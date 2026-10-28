@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { resolveCatalogReferences } from "./package-catalog.mjs";
+import { runPack } from "./package-publish-report.mjs";
 
 test("npm and pnpm pack only the current release without changing the repository changelog", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "eve-changelog-pack-"));
@@ -12,6 +14,7 @@ test("npm and pnpm pack only the current release without changing the repository
   const manifest = {
     name: "eve",
     version: "1.2.3",
+    packageManager: "pnpm@12.14.0",
     repository: {
       type: "git",
       url: "git+https://github.com/vercel/eve.git",
@@ -19,11 +22,23 @@ test("npm and pnpm pack only the current release without changing the repository
     },
     files: ["dist", "!dist/CHANGELOG.md"],
     publishConfig: { directory: ".package" },
+    peerDependencies: { example: "catalog:" },
+    peerDependenciesMeta: { example: { optional: true } },
+    devDependencies: { other: "catalog:stable", local: "workspace:*" },
     scripts: { prepack: `node "${script}" .` },
   };
   const source =
     "# eve\n\n## 1.2.4\n\n- Future change.\n\n## 1.2.3\n\n### Release eve@1.2.3 | 2026-10-27 | patch\n\n### 🚀 Features\n\n- Current change.\n\n```md\n## 9.9.9\n### 🚀 Features\n```\n\nText after the code block.\n\n## 1.2.2\n\n- Older change.\n";
   await writeFile(join(root, "package.json"), JSON.stringify(manifest));
+  await writeFile(
+    join(root, "pnpm-workspace.yaml"),
+    'verifyDepsBeforeRun: false\npackages:\n  - packages/*\ncatalog:\n  example: "1.2.3"\ncatalogs:\n  stable:\n    other: "2.3.4"\n',
+  );
+  await mkdir(join(root, "packages/local"), { recursive: true });
+  await writeFile(
+    join(root, "packages/local/package.json"),
+    JSON.stringify({ name: "local", version: "3.4.5" }),
+  );
   await writeFile(join(root, "CHANGELOG.md"), source);
   await mkdir(join(root, "dist"));
   await writeFile(join(root, "dist/CHANGELOG.md"), "Stale notes.\n");
@@ -59,8 +74,35 @@ test("npm and pnpm pack only the current release without changing the repository
       encoding: "utf8",
     },
   );
-  const npmTarball = join(root, JSON.parse(npmOutput)[0].filename);
-  for (const tarball of [pnpmTarball, npmTarball]) {
+  const npmTarball = join(root, "npm-direct.tgz");
+  await copyFile(join(root, JSON.parse(npmOutput)[0].filename), npmTarball);
+  const reportPack = await runPack(root, root);
+  const reportTarball = join(root, reportPack.filename);
+  assert.equal(reportPack.size, (await stat(pnpmTarball)).size);
+  assert.equal(reportPack.size, (await stat(reportTarball)).size);
+  const consumer = join(root, "consumer");
+  await mkdir(consumer);
+  await writeFile(
+    join(consumer, "package.json"),
+    JSON.stringify({ name: "consumer", private: true }),
+  );
+  execFileSync(
+    "npm",
+    [
+      "install",
+      "--offline",
+      "--ignore-scripts",
+      "--omit=peer",
+      "--no-audit",
+      "--no-fund",
+      npmTarball,
+    ],
+    {
+      cwd: consumer,
+      stdio: "pipe",
+    },
+  );
+  for (const tarball of [pnpmTarball, npmTarball, reportTarball]) {
     const files = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
     assert.match(files, /^package\/CHANGELOG\.md$/mu);
     assert.doesNotMatch(files, /package\/dist\/CHANGELOG\.md/u);
@@ -68,6 +110,12 @@ test("npm and pnpm pack only the current release without changing the repository
     const changelog = execFileSync("tar", ["-xOf", tarball, "package/CHANGELOG.md"], {
       encoding: "utf8",
     });
+    const packedManifest = JSON.parse(
+      execFileSync("tar", ["-xOf", tarball, "package/package.json"], { encoding: "utf8" }),
+    );
+    assert.equal(packedManifest.peerDependencies.example, "1.2.3");
+    assert.equal(packedManifest.devDependencies.other, "2.3.4");
+    if (tarball !== npmTarball) assert.equal(packedManifest.devDependencies.local, "3.4.5");
     assert.match(
       changelog,
       /^# Release eve@1\.2\.3 \| 2026-10-27 \| patch\n\n## 🚀 Features\n\n- Current change\./u,
@@ -131,6 +179,23 @@ test("npm and pnpm pack only the current release without changing the repository
     encoding: "utf8",
   });
   assert.match(localPreview, /\/abcdef0123456789\/packages\/eve\/CHANGELOG\.md/u);
+});
+
+test("catalog default aliases resolve from either workspace form", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "eve-default-catalog-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const config of [
+    'catalog:\n  example: "1.2.3"\n',
+    'catalogs:\n  default:\n    example: "1.2.3"\n',
+  ]) {
+    await writeFile(join(root, "pnpm-workspace.yaml"), config);
+    for (const range of ["catalog:", "catalog:default"]) {
+      const { manifest } = await resolveCatalogReferences(root, {
+        dependencies: { example: range },
+      });
+      assert.equal(manifest.dependencies.example, "1.2.3");
+    }
+  }
 });
 
 test("packing fails when the package version has no release notes", async (t) => {
