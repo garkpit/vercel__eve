@@ -8,7 +8,7 @@ import test from "node:test";
 test("npm and pnpm pack only the current release without changing the repository changelog", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "eve-changelog-pack-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const script = resolve("scripts/write-package-changelog.mjs");
+  const script = resolve("scripts/stage-package.mjs");
   const manifest = {
     name: "eve",
     version: "1.2.3",
@@ -17,25 +17,55 @@ test("npm and pnpm pack only the current release without changing the repository
       url: "git+https://github.com/vercel/eve.git",
       directory: "packages/eve",
     },
-    files: ["dist"],
+    files: ["dist", "!dist/CHANGELOG.md"],
+    publishConfig: { directory: ".package" },
     scripts: { prepack: `node "${script}" .` },
   };
   const source =
     "# eve\n\n## 1.2.4\n\n- Future change.\n\n## 1.2.3\n\n### Release eve@1.2.3 | 2026-10-27 | patch\n\n### 🚀 Features\n\n- Current change.\n\n```md\n## 9.9.9\n### 🚀 Features\n```\n\nText after the code block.\n\n## 1.2.2\n\n- Older change.\n";
   await writeFile(join(root, "package.json"), JSON.stringify(manifest));
   await writeFile(join(root, "CHANGELOG.md"), source);
+  await mkdir(join(root, "dist"));
+  await writeFile(join(root, "dist/CHANGELOG.md"), "Stale notes.\n");
   const pnpmTarball = join(root, "pnpm.tgz");
   execFileSync("pnpm", ["pack", "--out", pnpmTarball], { cwd: root, stdio: "pipe" });
-  const npmOutput = execFileSync("npm", ["pack", "--json", "--pack-destination", root], {
-    cwd: root,
-    encoding: "utf8",
-  });
+  assert.throws(
+    () =>
+      execFileSync("npm", ["pack", "--json", "--pack-destination", root], {
+        cwd: root,
+        stdio: "pipe",
+      }),
+    (error) => {
+      assert.match(`${error.stdout}\n${error.stderr}`, /Run pnpm pack/u);
+      return true;
+    },
+  );
+  const sourcePack = execFileSync(
+    "npm",
+    ["pack", "--ignore-scripts", "--json", "--pack-destination", root],
+    { cwd: root, encoding: "utf8" },
+  );
+  const sourceFiles = execFileSync(
+    "tar",
+    ["-tzf", join(root, JSON.parse(sourcePack)[0].filename)],
+    { encoding: "utf8" },
+  );
+  assert.doesNotMatch(sourceFiles, /CHANGELOG\.md/u);
+  const npmOutput = execFileSync(
+    "npm",
+    ["pack", "--ignore-scripts", "--json", "--pack-destination", root],
+    {
+      cwd: join(root, ".package"),
+      encoding: "utf8",
+    },
+  );
   const npmTarball = join(root, JSON.parse(npmOutput)[0].filename);
   for (const tarball of [pnpmTarball, npmTarball]) {
     const files = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
-    assert.match(files, /package\/dist\/CHANGELOG\.md/u);
-    assert.doesNotMatch(files, /^package\/CHANGELOG\.md$/mu);
-    const changelog = execFileSync("tar", ["-xOf", tarball, "package/dist/CHANGELOG.md"], {
+    assert.match(files, /^package\/CHANGELOG\.md$/mu);
+    assert.doesNotMatch(files, /package\/dist\/CHANGELOG\.md/u);
+    assert.doesNotMatch(files, /eve-changelog-backup/u);
+    const changelog = execFileSync("tar", ["-xOf", tarball, "package/CHANGELOG.md"], {
       encoding: "utf8",
     });
     assert.match(
@@ -53,6 +83,15 @@ test("npm and pnpm pack only the current release without changing the repository
     );
   }
   assert.equal(await readFile(join(root, "CHANGELOG.md"), "utf8"), source);
+  execFileSync("pnpm", ["pack", "--config.ignore-scripts=true", "--out", pnpmTarball], {
+    cwd: root,
+    stdio: "pipe",
+  });
+  const scriptsDisabled = execFileSync("tar", ["-xOf", pnpmTarball, "package/CHANGELOG.md"], {
+    encoding: "utf8",
+  });
+  assert.match(scriptsDisabled, /Current change\./u);
+  assert.doesNotMatch(scriptsDisabled, /Older change/u);
   const sourceSha = "abcdef0123456789abcdef0123456789abcdef01";
   await writeFile(
     join(root, "package.json"),
@@ -63,7 +102,7 @@ test("npm and pnpm pack only the current release without changing the repository
     stdio: "pipe",
     env: { ...process.env, VERCEL_GIT_COMMIT_SHA: sourceSha },
   });
-  const preview = execFileSync("tar", ["-xOf", pnpmTarball, "package/dist/CHANGELOG.md"], {
+  const preview = execFileSync("tar", ["-xOf", pnpmTarball, "package/CHANGELOG.md"], {
     encoding: "utf8",
   });
   assert.match(preview, /development build/u);
@@ -78,7 +117,7 @@ test("npm and pnpm pack only the current release without changing the repository
     stdio: "pipe",
     env: { ...process.env, VERCEL_GIT_COMMIT_SHA: sourceSha },
   });
-  const releasePreview = execFileSync("tar", ["-xOf", pnpmTarball, "package/dist/CHANGELOG.md"], {
+  const releasePreview = execFileSync("tar", ["-xOf", pnpmTarball, "package/CHANGELOG.md"], {
     encoding: "utf8",
   });
   assert.match(releasePreview, /^# Release eve@1\.2\.4$/mu);
@@ -88,7 +127,7 @@ test("npm and pnpm pack only the current release without changing the repository
     stdio: "pipe",
     env: { ...process.env, VERCEL_GIT_COMMIT_SHA: "" },
   });
-  const localPreview = execFileSync("tar", ["-xOf", pnpmTarball, "package/dist/CHANGELOG.md"], {
+  const localPreview = execFileSync("tar", ["-xOf", pnpmTarball, "package/CHANGELOG.md"], {
     encoding: "utf8",
   });
   assert.match(localPreview, /\/abcdef0123456789\/packages\/eve\/CHANGELOG\.md/u);
@@ -130,4 +169,29 @@ test("packing fails when the package version has no release notes", async (t) =>
   );
   assert.match(changelog, /Current notes\./u);
   assert.doesNotMatch(changelog, /Old notes\./u);
+});
+
+test("a failed pack leaves the repository changelog intact", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "eve-changelog-interrupted-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = "# eve\n\n## 1.0.0\n\nCurrent notes.\n\n## 0.9.0\n\nOlder notes.\n";
+  await writeFile(
+    join(root, "package.json"),
+    JSON.stringify({
+      name: "eve",
+      version: "1.0.0",
+      repository: { directory: "packages/eve" },
+      files: ["dist"],
+      publishConfig: { directory: ".package" },
+      scripts: { prepack: `node "${resolve("scripts/stage-package.mjs")}" .` },
+    }),
+  );
+  await writeFile(join(root, "CHANGELOG.md"), source);
+  assert.throws(() =>
+    execFileSync("pnpm", ["pack", "--out", join(root, "CHANGELOG.md", "package.tgz")], {
+      cwd: root,
+      stdio: "pipe",
+    }),
+  );
+  assert.equal(await readFile(join(root, "CHANGELOG.md"), "utf8"), source);
 });
