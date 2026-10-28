@@ -234,7 +234,7 @@ jobs:
 
       - name: Build eve package
         if: ${{ steps.mode.outputs.acknowledge_only != 'true' }}
-        run: pnpm --filter eve build
+        run: pnpm build:eve
 
       - name: Build weather-agent for size analysis
         if: ${{ steps.mode.outputs.acknowledge_only != 'true' }}
