@@ -103,22 +103,17 @@ test("the Changesets formatter produces readable Markdown without encoded metada
     if (oldToken === undefined) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = oldToken;
   });
-  t.mock.method(
-    globalThis,
-    "fetch",
-    async () =>
-      new Response(
-        JSON.stringify([
-          {
-            number: 10,
-            title: "Edited title without a category",
-            user: { login: "Alice" },
-            merged_at: "2026-01-01",
-            base: { ref: "main" },
-          },
-        ]),
-      ),
-  );
+  let pulls = [
+    {
+      number: 10,
+      title: "Edited title without a category",
+      user: { login: "Alice" },
+      merged_at: "2026-01-01",
+      base: { ref: "topic-branch" },
+      merge_commit_sha: commit,
+    },
+  ];
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify(pulls)));
   const line = await formatter.getReleaseLine({ id: "example", summary: "Add a tool.", commit });
   assert.match(
     line,
@@ -126,6 +121,33 @@ test("the Changesets formatter produces readable Markdown without encoded metada
   );
   assert.match(line, /#### Contributors\n\n- \[@Alice\]\(https:\/\/github\.com\/Alice\)/u);
   assert.doesNotMatch(line, /<!--/u);
+  git("commit", "--allow-empty", "-qm", "fix: Update a tool");
+  const fallbackCommit = git("rev-parse", "HEAD");
+  pulls = [
+    { number: 11, user: { login: "Bob" }, merged_at: "2026-01-01", merge_commit_sha: commit },
+  ];
+  const fallback = await formatter.getReleaseLine({
+    id: "fallback",
+    summary: "Update a tool.",
+    commit: fallbackCommit,
+  });
+  assert.match(fallback, /- Update a tool\. \[#11\]/u);
+  git("commit", "--allow-empty", "-qm", "fix: Repair a tool");
+  const ambiguousCommit = git("rev-parse", "HEAD");
+  pulls.push({
+    number: 12,
+    user: { login: "Carol" },
+    merged_at: "2026-01-01",
+    merge_commit_sha: fallbackCommit,
+  });
+  await assert.rejects(
+    formatter.getReleaseLine({
+      id: "ambiguous",
+      summary: "Repair a tool.",
+      commit: ambiguousCommit,
+    }),
+    /expected one merged pull request.*found 2/u,
+  );
 });
 
 test("version-packages assembles changesets across bump types and preserves old releases", async (t) => {
@@ -210,7 +232,12 @@ test("version-packages assembles changesets across bump types and preserves old 
   git("commit", "-qm", "Legacy change");
   await write(
     "mock-github.mjs",
-    `globalThis.fetch = async (url) => new Response(JSON.stringify([{number: url.includes(${JSON.stringify(first)}) ? 10 : url.includes(${JSON.stringify(second)}) ? 11 : 12, title: "Edited title", user: {login: "Author"}, merged_at: "2026-01-01", base: {ref: "main"}}]), {status: 200});`,
+    `globalThis.fetch = async (url) => {
+      const commit = url.split("/").at(-2);
+      const pull = {number: commit === ${JSON.stringify(first)} ? 10 : commit === ${JSON.stringify(second)} ? 11 : 12, title: "Edited title", user: {login: "Author"}, merged_at: "2026-01-01", base: {ref: commit === ${JSON.stringify(second)} ? "topic-branch" : "main"}, merge_commit_sha: commit};
+      const other = {number: 99, user: {login: "Other"}, merged_at: "2026-01-02", base: {ref: "main"}, merge_commit_sha: "another-commit"};
+      return new Response(JSON.stringify(commit === ${JSON.stringify(second)} ? [other, pull] : [pull]), {status: 200});
+    };`,
   );
   assert.throws(() =>
     execFileSync(process.execPath, ["scripts/check-release-pr-title.mjs"], {
