@@ -203,6 +203,18 @@
       "import": "./dist/src/public/tools/workflow.js",
       "default": "./dist/src/public/tools/workflow.js"
     },
+    "./workflow": {
+      "eve-source": "./src/public/workflow/index.ts",
+      "types": "./dist/src/public/workflow/index.d.ts",
+      "import": "./dist/src/public/workflow/index.js",
+      "default": "./dist/src/public/workflow/index.js"
+    },
+    "./workflow/api": {
+      "eve-source": "./src/public/workflow/api.ts",
+      "types": "./dist/src/public/workflow/api.d.ts",
+      "import": "./dist/src/public/workflow/api.js",
+      "default": "./dist/src/public/workflow/api.js"
+    },
     "./workflow-modules": {
       "eve-source": "./dist/src/public/workflow-modules.d.ts",
       "types": "./dist/src/public/workflow-modules.d.ts"
@@ -389,6 +401,24 @@
       "import": "./dist/src/public/server/index.js",
       "default": "./dist/src/public/server/index.js"
     },
+    "./experimental/workspace": {
+      "eve-source": "./src/public/experimental/workspace/index.ts",
+      "types": "./dist/src/public/experimental/workspace/index.d.ts",
+      "import": "./dist/src/public/experimental/workspace/index.js",
+      "default": "./dist/src/public/experimental/workspace/index.js"
+    },
+    "./experimental/sandbox/just-bash": {
+      "eve-source": "./src/public/experimental/sandbox/just-bash.ts",
+      "types": "./dist/src/public/experimental/sandbox/just-bash.d.ts",
+      "import": "./dist/src/public/experimental/sandbox/just-bash.js",
+      "default": "./dist/src/public/experimental/sandbox/just-bash.js"
+    },
+    "./experimental/channels/discord/gateway": {
+      "eve-source": "./src/public/experimental/channels/discord/gateway.ts",
+      "types": "./dist/src/public/experimental/channels/discord/gateway.d.ts",
+      "import": "./dist/src/public/experimental/channels/discord/gateway.js",
+      "default": "./dist/src/public/experimental/channels/discord/gateway.js"
+    },
     "./experimental/schedules/testing": {
       "eve-source": "./src/public/experimental/schedules/testing.ts",
       "types": "./dist/src/public/experimental/schedules/testing.d.ts",
@@ -456,11 +486,6 @@
       "types": "./dist/src/public/channels/discord/index.d.ts",
       "import": "./dist/src/public/channels/discord/index.js",
       "default": "./dist/src/public/channels/discord/index.js"
-    },
-    "./channels/discord/gateway": {
-      "types": "./dist/src/public/channels/discord/gateway/index.d.ts",
-      "import": "./dist/src/public/channels/discord/gateway/index.js",
-      "default": "./dist/src/public/channels/discord/gateway/index.js"
     },
     "./channels/twilio": {
       "types": "./dist/src/public/channels/twilio/index.d.ts",
