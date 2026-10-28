@@ -65,6 +65,9 @@
         "!src/computer-use/extension/**"
       ]
     },
+    "test:unit": {
+      "dependsOn": ["build"]
+    },
     "typecheck": {
       "dependsOn": ["$TURBO_EXTENDS$", "build:compiled"],
       "inputs": [
