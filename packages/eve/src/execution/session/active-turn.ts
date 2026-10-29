@@ -316,6 +316,13 @@ export class ActiveTurn {
           );
         }
         return false;
+      case "unsupported": {
+        const { settlement } = admitted;
+        await this.input.cursor.advance((state) =>
+          settleControlDeliveryStep({ ...state, settlement }),
+        );
+        return false;
+      }
       case "consumed":
         return value.kind === "authorization-callback";
     }

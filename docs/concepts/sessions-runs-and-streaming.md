@@ -175,6 +175,8 @@ Everything that reaches a session arrives as a delivery: a message, an answer, a
 | `refused`        | Its sender may not do what it asked; `reason` says why.                                             |
 | `failed`         | It couldn't be handled, such as when the session ended first.                                       |
 
+A control the session's eve version doesn't support, such as one added in a later release, settles `failed` with a `reason` that names it: a session keeps running on the deployment that started it, so it can receive controls newer than its code. Sessions started by earlier eve versions drop such a control instead, and its delivery never settles.
+
 `POST /eve/v1/session/:sessionId` returns the message's `deliveryId`, so a client resuming from an old cursor knows which `delivery.settled` ends its response. Steering and coalesced messages each keep their own delivery. The id is assigned before dispatch,
 not derived from stream position. An answer-only delivery stops on its own `delivery.settled`.
 Ending a stranded session records the control's admission and settlement, with
