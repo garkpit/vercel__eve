@@ -15,6 +15,7 @@ import type {
   ConnectionPrincipal,
   ConnectionToolMetadata,
 } from "#shared/connection-types.js";
+import type { ToolSchema } from "#tools/schema.js";
 
 import { connectionEntry } from "./connection-entry.js";
 
@@ -224,5 +225,56 @@ describe("connection tool call", () => {
   it("gives an approved event action's headers its approver", async () => {
     await expect(call(user("bob"), subscribe.name)).resolves.toEqual({ approvedBy: "bob" });
     await expect(call(undefined, subscribe.name)).resolves.toEqual({ approvedBy: "" });
+  });
+});
+
+describe("connection tool calls", () => {
+  it("runs a call whose omitted argument defaults to null", async () => {
+    // Pydantic publishes `query: str = None` as a string property that defaults to null.
+    const search: ConnectionToolMetadata = {
+      description: "Search issues.",
+      inputSchema: { properties: { query: { default: null, type: "string" } }, type: "object" },
+      name: "search_issues",
+    };
+    const executeTool = vi.fn<ConnectionClient["executeTool"]>(async () => ({ content: [] }));
+    const connection = {
+      connectionName: "tracker",
+      description: "Issue tracker.",
+      logicalPath: "connections/tracker.ts",
+      protocol: "mcp",
+      sourceId: "tracker",
+      sourceKind: "module",
+      url: "https://tracker.example.com/mcp",
+    } as ResolvedConnectionDefinition;
+    const client: ConnectionClient = {
+      close: async () => {},
+      connect: async () => undefined,
+      executeTool,
+      getToolMetadata: async () => [search],
+    };
+    const registry: ConnectionRegistry = {
+      dispose: async () => {},
+      getClient: () => client,
+      getConnectionApproval: () => undefined,
+      getConnectionNames: () => ["tracker"],
+      getConnections: () => [connection],
+    };
+    const entry = connectionEntry(registry, connection, "search_issues");
+
+    // The harness validates the model's input, then runs the tool on the validated value.
+    await contextStorage.run(new ContextContainer(), async () => {
+      const checked = await (entry.inputSchema as ToolSchema)["~standard"].validate({});
+      expect(checked).toEqual({ value: {} });
+      await entry.execute!((checked as { value: unknown }).value, {
+        messages: [],
+        toolCallId: "call-search",
+      });
+    });
+
+    expect(executeTool).toHaveBeenCalledWith(
+      "search_issues",
+      { query: null },
+      expect.objectContaining({ callId: "call-search" }),
+    );
   });
 });
