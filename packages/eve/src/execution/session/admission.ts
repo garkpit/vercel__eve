@@ -83,8 +83,12 @@ export async function admitSessionInboxPayload(
       return { admission, kind: "delivery" };
     }
     case "clear":
+      // A clear starts over: it stops the running turn and its tasks, as a reset does, then runs.
+      // It carries no origin: the queued control, not the cancel, settles its delivery.
+      input.queue.enqueueControl("clear", controlOrigin(command));
+      return { kind: "cancel" };
     case "compact":
-      input.queue.enqueueControl(command.kind, controlOrigin(command));
+      input.queue.enqueueControl("compact", controlOrigin(command));
       return { kind: "consumed" };
     case "session-timeout":
       // A previous owner's timer may fire after handoff; only this owner's deadline counts.
