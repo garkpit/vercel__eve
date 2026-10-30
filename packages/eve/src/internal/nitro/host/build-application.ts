@@ -9,10 +9,6 @@ import {
   resolvePackageSourceFilePath,
 } from "#internal/application/package.js";
 import {
-  prepareEveVersionedCacheDirectory,
-  writeEveVersionedCacheMetadata,
-} from "#internal/application/cache-metadata.js";
-import {
   createApplicationBuildWorkspace,
   removeApplicationBuildWorkspace,
   type ApplicationBuildWorkspace,
@@ -33,7 +29,7 @@ import {
   materializeVercelWorkflowFunctionOutput,
   normalizeEveVercelFunctionOutput,
 } from "#internal/workflow-bundle/vercel-workflow-output.js";
-import { createProductionApplicationNitro } from "#internal/nitro/host/create-application-nitro.js";
+import { createHostNitro } from "#internal/nitro/host/create-host-nitro.js";
 import { emitVercelAgentSummary } from "#internal/nitro/host/build-vercel-agent-summary.js";
 import { emitConnectManifest } from "#internal/external-resources.js";
 import { tryReadExtensionBuildConfig } from "#internal/nitro/host/build-extension.js";
@@ -215,16 +211,10 @@ async function buildNitroOutput(
 ): Promise<string> {
   const outputDirectory = trimTrailingSlash(nitro.options.output.dir);
 
-  await measureBuildPhase(profiler, `${phasePrefix}.cache.prepare`, () =>
-    prepareEveVersionedCacheDirectory(outputDirectory),
-  );
   await measureBuildPhase(profiler, `${phasePrefix}.prepare`, () => prepare(nitro));
   await measureBuildPhase(profiler, `${phasePrefix}.public-assets`, () => copyPublicAssets(nitro));
   await measureBuildPhase(profiler, `${phasePrefix}.prerender`, () => prerender(nitro));
   await measureBuildPhase(profiler, `${phasePrefix}.bundle`, () => buildNitro(nitro));
-  await measureBuildPhase(profiler, `${phasePrefix}.cache.write`, () =>
-    writeEveVersionedCacheMetadata(outputDirectory),
-  );
 
   return outputDirectory;
 }
@@ -331,12 +321,16 @@ async function buildApplicationInWorkspace(
   const publicRoutePrefix = options.publicRoutePrefix ?? inferredPublicRoutePrefix;
   const sandboxScope = createProductionNitroArtifactsConfig(workspace.appRoot).sandboxScope;
   const nitro = await measureBuildPhase(profiler, "nitro.create", () =>
-    createProductionApplicationNitro(preparedHost, {
-      buildDir: workspace.nitro.buildDir,
-      outputDir: workspace.publication.output.stagedDir,
-      publicRoutePrefix,
-      workspaceMember: options.workspaceMember,
-    }),
+    createHostNitro(
+      preparedHost,
+      {
+        kind: "production",
+        preset: isVercelBuild ? "vercel" : undefined,
+        publicRoutePrefix,
+        workspaceMember: options.workspaceMember,
+      },
+      { buildDir: workspace.nitro.buildDir, outputDir: workspace.publication.output.stagedDir },
+    ),
   );
 
   try {
