@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 
 import type { NitroEventHandler } from "nitro/types";
@@ -18,8 +18,10 @@ import {
   renderChannelPreflightHandler,
   renderChannelWebSocketHandler,
   renderHostHandler,
+  renderRouteConfigModule,
   renderScheduleTaskModule,
   renderWorkflowFileHandler,
+  ROUTE_CONFIG_ID,
 } from "#internal/nitro/host/route-handlers.js";
 import type { NitroArtifactsConfig } from "#internal/nitro/routes/runtime-artifacts.js";
 import {
@@ -27,7 +29,7 @@ import {
   hasVercelScheduleCollections,
 } from "#internal/schedules/consumer-route.js";
 import type { WorkflowArtifacts } from "#internal/workflow-bundle/builder.js";
-import { EVE_WORKFLOW_FLOW_ROUTE_PATH } from "#internal/workflow-bundle/eve-service-route-output.js";
+import { EVE_WORKFLOW_FLOW_ROUTE_PATH } from "#internal/workflow-bundle/flow-route.js";
 import { usesParentDevelopmentWorkflowWorld } from "#internal/workflow/development-world-protocol.js";
 import { deriveEveWorkflowQueuePrefix } from "#internal/workflow/queue-namespace.js";
 
@@ -130,14 +132,14 @@ export function createHostRouteTable(input: HostRouteTableInput): HostRouteTable
     routes.push({
       kind: "schedule-consumer",
       method: "POST",
-      path: EVE_SCHEDULE_COLLECTION_CONSUMER_ROUTE_PATH,
+      path: staticVercelFunctionPath(EVE_SCHEDULE_COLLECTION_CONSUMER_ROUTE_PATH),
       vercelFunction: "schedule-queue",
     });
   }
   routes.push({
     kind: "workflow",
     method: "ALL",
-    path: EVE_WORKFLOW_FLOW_ROUTE_PATH,
+    path: staticVercelFunctionPath(EVE_WORKFLOW_FLOW_ROUTE_PATH),
     vercelFunction: "workflow-queue",
     ...(hasDirectWorkflowQueue(input) && {
       directQueuePrefix: deriveEveWorkflowQueuePrefix(manifest.config.name),
@@ -177,6 +179,17 @@ function withHeadAllow(route: HostRoute, routes: readonly HostRoute[]): HostRout
 }
 
 /**
+ * A route with its own Vercel function must be static: eve names that
+ * function's directory after the path instead of after Nitro's pattern rules.
+ */
+function staticVercelFunctionPath(path: string): string {
+  if (/[:*]/.test(path)) {
+    throw new Error(`A route with its own Vercel function must be static: ${path}`);
+  }
+  return path;
+}
+
+/**
  * An unguessable cron path under eve's protocol prefix. Vercel cron requests
  * otherwise hit the public `/_vercel/cron` and rely on a `CRON_SECRET` the
  * user must set; the path itself is the secret here. Vercel reads it from the
@@ -195,19 +208,25 @@ export interface HostNitroRoutes {
 }
 
 /**
- * Renders the route table into Nitro config. Writes the workflow handler file
+ * Renders the route table into Nitro config. Writes the artifacts config every
+ * route module shares to `artifactsConfigPath` and the workflow handler file
  * beside the workflow bundle; everything else is a virtual module.
  */
 export async function renderHostRoutes(
   table: HostRouteTable,
   input: {
     readonly artifactsConfig: NitroArtifactsConfig;
+    readonly artifactsConfigPath: string;
     readonly workflowArtifacts: WorkflowArtifacts;
     readonly workflowWorldPluginPath?: string;
   },
 ): Promise<HostNitroRoutes> {
+  await mkdir(dirname(input.artifactsConfigPath), { recursive: true });
+  await writeFile(input.artifactsConfigPath, JSON.stringify(input.artifactsConfig));
   const handlers: NitroEventHandler[] = [];
-  const virtual: Record<string, string> = {};
+  const virtual: Record<string, string> = {
+    [ROUTE_CONFIG_ID]: renderRouteConfigModule({ configPath: input.artifactsConfigPath }),
+  };
   const addVirtualHandler = (
     id: string,
     source: string,
@@ -217,26 +236,45 @@ export async function renderHostRoutes(
     handlers.push({ handler: id, ...registration });
   };
 
+  // A WebSocket upgrade arrives as a GET, so a path with both routes gets one
+  // GET handler that serves HTTP requests and answers upgrades. Paths match
+  // as the router matches them: parameter names don't distinguish them.
+  const channelRoutes = table.routes.filter((route) => route.kind === "channel");
+  const httpGetPatterns = new Set(
+    channelRoutes
+      .filter((route) => route.method === "GET")
+      .map((route) => normalizeRoutePattern(route.path)),
+  );
+  const websocketRouteKeys = new Map(
+    channelRoutes
+      .filter((route) => route.method === "WEBSOCKET")
+      .map((route) => [normalizeRoutePattern(route.path), `WEBSOCKET ${route.path}`]),
+  );
+
   for (const route of table.routes) {
     switch (route.kind) {
       case "channel": {
         const routeKey = `${route.method} ${route.path}`;
         const id = `#eve/channel/${routeKey}`;
+        const pattern = normalizeRoutePattern(route.path);
         if (route.method === "WEBSOCKET") {
-          addVirtualHandler(
-            id,
-            renderChannelWebSocketHandler({ artifactsConfig: input.artifactsConfig, routeKey }),
-            { route: route.path },
-          );
+          if (!httpGetPatterns.has(pattern)) {
+            addVirtualHandler(id, renderChannelWebSocketHandler({ routeKey }), {
+              method: "GET",
+              route: route.path,
+            });
+          }
           break;
         }
+        const websocketRouteKey =
+          route.method === "GET" ? websocketRouteKeys.get(pattern) : undefined;
         addVirtualHandler(
           id,
           renderChannelHandler({
             allow: route.allow,
-            artifactsConfig: input.artifactsConfig,
             cors: route.cors,
             routeKey,
+            ...(websocketRouteKey !== undefined && { websocketRouteKey }),
           }),
           { method: route.method, route: route.path },
         );
@@ -258,7 +296,7 @@ export async function renderHostRoutes(
         addVirtualHandler(
           `#eve/route${route.path}`,
           renderHostHandler({
-            args: { artifactsConfig: input.artifactsConfig, connectionName: route.connectionName },
+            context: { connectionName: route.connectionName },
             handlerExport: "handleConnectionEventRequest",
             modulePath: "src/internal/nitro/routes/connection-events.ts",
           }),
@@ -272,7 +310,6 @@ export async function renderHostRoutes(
         addVirtualHandler(
           `#eve/route${route.path}`,
           renderHostHandler({
-            args: input.artifactsConfig,
             handlerExport: "handleDevScheduleDispatchRequest",
             modulePath: "src/internal/nitro/routes/dev-schedule-dispatch.ts",
           }),
@@ -283,7 +320,6 @@ export async function renderHostRoutes(
         addVirtualHandler(
           `#eve/route${route.path}`,
           renderHostHandler({
-            args: input.artifactsConfig,
             handlerExport: "handleScheduleCollectionConsumer",
             modulePath: "src/internal/nitro/routes/schedule-collection-consumer.ts",
           }),
@@ -303,10 +339,7 @@ export async function renderHostRoutes(
   const scheduledTasks: Record<string, string[]> = {};
   for (const task of table.scheduleTasks) {
     const id = `#eve/schedule-task/${task.taskName}`;
-    virtual[id] = renderScheduleTaskModule({
-      artifactsConfig: input.artifactsConfig,
-      description: task.description,
-    });
+    virtual[id] = renderScheduleTaskModule({ description: task.description });
     tasks[task.taskName] = { description: task.description, handler: id };
     const cronTasks = (scheduledTasks[task.cron] ??= []);
     if (!cronTasks.includes(task.taskName)) cronTasks.push(task.taskName);

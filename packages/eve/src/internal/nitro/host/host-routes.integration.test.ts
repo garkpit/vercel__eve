@@ -1,8 +1,8 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { H3 } from "nitro/h3";
+import { getRouterParams, H3, type H3Event } from "nitro/h3";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CompiledAgentManifest, CompiledChannelDefinition } from "#compiler/manifest.js";
@@ -13,12 +13,13 @@ import { resolveWorkflowModulePath } from "#internal/application/package.js";
 import { createDevelopmentNitroArtifactsConfig } from "#internal/nitro/host/artifacts-config.js";
 import { createHostRouteTable, renderHostRoutes } from "#internal/nitro/host/host-routes.js";
 import { useTemporaryDirectories } from "#internal/testing/use-temporary-app-roots.js";
-import { EVE_WORKFLOW_FLOW_ROUTE_PATH } from "#internal/workflow-bundle/eve-service-route-output.js";
+import { EVE_WORKFLOW_FLOW_ROUTE_PATH } from "#internal/workflow-bundle/flow-route.js";
 
 const routeModules = vi.hoisted(() => ({
   dispatchChannelRequest: vi.fn(
     async (_event: unknown, routeKey: string) => new Response(`channel ${routeKey}`),
   ),
+  dispatchChannelWebSocketRequest: vi.fn(async (_event: unknown) => ({})),
   dispatchScheduleTask: vi.fn(async (name: string) => `ran ${name}`),
   handleConnectionEventRequest: vi.fn(async () => new Response("connection")),
   handleDevScheduleDispatchRequest: vi.fn(async () => new Response("dev schedule")),
@@ -26,7 +27,7 @@ const routeModules = vi.hoisted(() => ({
 
 vi.mock("#internal/nitro/routes/channel-dispatch.js", () => ({
   dispatchChannelRequest: routeModules.dispatchChannelRequest,
-  dispatchChannelWebSocketRequest: vi.fn(),
+  dispatchChannelWebSocketRequest: routeModules.dispatchChannelWebSocketRequest,
 }));
 vi.mock("#internal/nitro/routes/connection-events.js", () => ({
   handleConnectionEventRequest: routeModules.handleConnectionEventRequest,
@@ -75,6 +76,8 @@ function manifest(world?: string): Parameters<typeof createHostRouteTable>[0]["m
       effective: [
         channel("GET", "/stream", {}),
         channel("POST", "/stream", {}),
+        channel("GET", "/rooms/:id"),
+        channel("WEBSOCKET", "/rooms/:id"),
         channel("GET", "/health"),
         channel("HEAD", "/health"),
         channel("WEBSOCKET", "/voice"),
@@ -116,6 +119,7 @@ async function serve(input: {
     }),
     {
       artifactsConfig,
+      artifactsConfigPath: join(directory, "route-config.json"),
       workflowArtifacts: {
         stepTargets: [],
         stepsPath: join(directory, "steps.mjs"),
@@ -125,10 +129,23 @@ async function serve(input: {
     },
   );
 
+  // Links the virtual modules as Nitro's bundler does: virtual ids resolve to
+  // earlier virtual modules, and a `text:` import yields the file's text.
   const modules = new Map<string, { default: unknown }>();
+  const urls = new Map<string, string>();
   for (const [index, [id, source]] of Object.entries(routes.virtual).entries()) {
+    let linked = source;
+    for (const [specifier, path] of source.matchAll(/"text:([^"]+)"/g)) {
+      const textFile = join(directory, `text-${index}.mjs`);
+      await writeFile(textFile, `export default ${JSON.stringify(await readFile(path!, "utf8"))};`);
+      linked = linked.replace(specifier, JSON.stringify(pathToFileURL(textFile).href));
+    }
+    for (const [virtualId, url] of urls) {
+      linked = linked.replaceAll(JSON.stringify(virtualId), JSON.stringify(url));
+    }
     const file = join(directory, `virtual-${index}.mjs`);
-    await writeFile(file, source);
+    await writeFile(file, linked);
+    urls.set(id, pathToFileURL(file).href);
     modules.set(id, await import(pathToFileURL(file).href));
   }
   const load = async (handler: string) =>
@@ -198,8 +215,30 @@ describe("rendered host routes", () => {
     expect(handlerAt("/stream", "HEAD")).toBe(handlerAt("/stream", "GET"));
     expect(methodsAt("/health")).toEqual(["GET", "HEAD"]);
     expect(handlerAt("/health", "HEAD")).not.toBe(handlerAt("/health", "GET"));
-    // WebSocket upgrades arrive as GET, so the route accepts every method.
-    expect(methodsAt("/voice")).toEqual([undefined]);
+    // WebSocket upgrades arrive as GET.
+    expect(methodsAt("/voice")).toEqual(["GET"]);
+  });
+
+  it("answers upgrades and HTTP requests on a path with both from one GET handler", async () => {
+    const host = await serve({ mode: "production" });
+    let upgradeParams: Record<string, string> | undefined;
+    routeModules.dispatchChannelWebSocketRequest.mockImplementationOnce(async (event) => {
+      upgradeParams = getRouterParams(event as H3Event, { decode: true });
+      return {};
+    });
+
+    const upgrade = await host.fetch("/rooms/1", { headers: { upgrade: "websocket" } });
+    expect(upgrade.status).toBe(426);
+    expect(routeModules.dispatchChannelWebSocketRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      "WEBSOCKET /rooms/:id",
+      artifactsConfig,
+    );
+    expect(upgradeParams).toEqual({ id: "1" });
+    expect(routeModules.dispatchChannelRequest).not.toHaveBeenCalled();
+
+    expect(await (await host.fetch("/rooms/1")).text()).toBe("channel GET /rooms/:id");
+    expect(routeModules.dispatchChannelWebSocketRequest).toHaveBeenCalledTimes(1);
   });
 
   it("answers CORS preflights without dispatching to the channel", async () => {
